@@ -9,10 +9,16 @@ class Ray:
         self.dim = origin.shape[:2]
 
 class Scene:
-    def __init__(self, background, ambient, objects):
+    def __init__(self, background, ambient, objects, lights):
         self.background = torch.tensor(background)
         self.ambient = torch.tensor(ambient)
         self.objects = objects
+        self.lights = lights
+
+class Light():
+    def __init__(self, center, color):
+        self.center = torch.tensor(center)
+        self.color = torch.tensor(color)
 
 class Camera:
     def __init__(self, center, target, focus=300, width=200, height=100, ppi=1):
@@ -50,10 +56,11 @@ class Camera:
     
 
 class Sphere:
-    def __init__(self, center, radius, ambient):
+    def __init__(self, center, radius, ambient, diffuse):
         self.center = torch.tensor(center)
         self.radius = torch.tensor(radius)
         self.ambient = torch.tensor(ambient)
+        self.diffuse = torch.tensor(diffuse)
     
     def intersect(self, ray):
         ray_to_center = self.center - ray.origin
@@ -69,6 +76,21 @@ class Sphere:
         color = torch.zeros([*ray.dim, 3])
         color[mask] = self.ambient * scene.ambient
 
+        light_center = [light.center for light in scene.lights]
+        light_center = torch.stack(light_center, dim=0).unsqueeze(0)
+        light_color = [light.color for light in scene.lights]
+        light_color = torch.stack(light_color, dim=0).unsqueeze(0)
+
+        hit_point = ray.origin + ray.dir * z_buffer.unsqueeze(-1)
+        hit_point = hit_point[mask].unsqueeze(1)
+        normal = (hit_point - self.center) / self.radius
+        to_light = light_center - hit_point
+        to_light /= to_light.norm(dim=-1, keepdim=True)
+        inner_prod = (normal * to_light).sum(-1).unsqueeze(-1)
+        inner_prod[inner_prod < 0] = 0
+        diffuse = self.diffuse * inner_prod * light_color
+        color[mask] += diffuse.sum(dim=1)
+        
         return color
 
 
@@ -92,4 +114,5 @@ def render(scene, camera):
     ray = camera.gen_ray()
     image = trace(scene, ray)
     image[shaded(image).logical_not()] = scene.background
+    image[image >= 1] = 1
     return image
