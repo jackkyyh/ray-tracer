@@ -53,27 +53,15 @@ class Camera:
         origin = origin + self.center
 
         return Ray(origin, dir)
-    
-class Sphere:
-    def __init__(self, center, radius, ambient, diffuse, specular, specular_n):
-        self.center = torch.tensor(center)
-        self.radius = torch.tensor(radius)
+
+class Object:
+    def __init__(self, ambient, diffuse, specular, specular_n):
         self.ambient = torch.tensor(ambient)
         self.diffuse = torch.tensor(diffuse)
         self.specular = torch.tensor(specular)
         self.specular_n = torch.tensor(specular_n)
     
-    def intersect(self, ray):
-        ray_to_center = self.center - ray.origin
-        dist = ray_to_center.norm(dim=-1)
-        c = (ray.dir * ray_to_center).sum(dim=-1)
-        s = dist**2 - c**2
-
-        hit_point_dist = c - torch.sqrt(self.radius**2 - s)
-        hit_point_dist[hit_point_dist.isnan()] = torch.inf
-        return hit_point_dist
-
-    def shade(self, ray, mask, z_buffer, scene):
+    def shade(self, ray, mask, hit_dist, scene):
         ambient = self.ambient * scene.ambient
 
         light_center = [light.center for light in scene.lights]
@@ -81,9 +69,10 @@ class Sphere:
         light_color = [light.color for light in scene.lights]
         light_color = torch.stack(light_color, dim=0).unsqueeze(0)
 
-        hit_point = ray.origin + ray.dir * z_buffer.unsqueeze(-1)
+        hit_point = ray.origin + ray.dir * hit_dist.unsqueeze(-1)
         hit_point = hit_point[mask].unsqueeze(1)
-        normal = (hit_point - self.center) / self.radius
+        normal = self.normal(ray, hit_point)
+
         to_light = normalize(light_center - hit_point, dim=-1)
         inner_prod = (normal * to_light).sum(-1).unsqueeze(-1)
         inner_prod[inner_prod < 0] = 0
@@ -98,6 +87,53 @@ class Sphere:
         color[mask] += ambient + diffuse.sum(dim=1) + specular.sum(dim=1)
         return color
 
+class Rect(Object):
+    def __init__(self, center, width, height, width_dir, normal, **kwargs):
+        super().__init__(**kwargs)
+        self.center = torch.tensor(center)
+        self.width = width
+        self.height = height
+        self.width_dir = torch.tensor(width_dir)
+        self.normal_vec = torch.tensor(normal)
+        assert self.width_dir @ self.normal_vec == 0, "normal vector and width direction not perpendicular"
+
+    def intersect(self, ray):
+        origin_to_center = self.center - ray.origin
+        origin_to_center_dist = (origin_to_center * self.normal_vec).sum(dim=-1,)
+        ray_normal_angle = (ray.dir * self.normal_vec).sum(dim=-1)
+        hit_dist = origin_to_center_dist / ray_normal_angle
+        hit_point = ray.origin + ray.dir * hit_dist.unsqueeze(dim=-1)
+        center_to_hit = hit_point - self.center
+        w_sq = (center_to_hit * self.width_dir).sum(dim=-1)**2
+        h_sq = (center_to_hit**2).sum(dim=-1) - w_sq
+
+        hit_dist[torch.logical_or(w_sq > self.width**2/4, h_sq > self.height**2/4)] = torch.inf
+        hit_dist[hit_dist < 0] = torch.inf
+        return hit_dist
+
+    def normal(self, *args):
+        return self.normal_vec
+
+class Sphere(Object):
+    def __init__(self, center, radius, **kwargs):
+        super().__init__(**kwargs)
+        self.center = torch.tensor(center)
+        self.radius = torch.tensor(radius)
+
+    def intersect(self, ray):
+        ray_to_center = self.center - ray.origin
+        dist = ray_to_center.norm(dim=-1)
+        c = (ray.dir * ray_to_center).sum(dim=-1)
+        s = dist**2 - c**2
+
+        hit_dist = c - torch.sqrt(self.radius**2 - s)
+        hit_dist[hit_dist.isnan()] = torch.inf
+        return hit_dist
+
+    def normal(self, ray, hit_point):
+        normal = (hit_point - self.center) / self.radius
+        return normal
+
 
 def trace(scene, ray):
     z_buffer = [object.intersect(ray) for object in scene.objects]
@@ -111,7 +147,7 @@ def trace(scene, ray):
         shade = obj.shade(ray, mask, z_buffer[idx], scene)
         assert not torch.logical_and(mask.logical_not(), shaded(shade)).any(), "Shading outside of interection!"
         image += shade
-    
+
     return image
 
     
