@@ -1,4 +1,5 @@
 import torch
+from torch.nn.functional import normalize
 
 shaded = lambda im: (im != 0).any(dim=-1)
 
@@ -46,21 +47,21 @@ class Camera:
         origin = torch.stack([d, -w, -h], dim=-1)
         eye = torch.tensor([-self.focus, 0, 0])
         dir = origin - eye
-        dir = dir @ ry.T @ rz.T
-        dir = dir / dir.norm(dim=-1, keepdim=True)
+        dir = normalize(dir @ ry.T @ rz.T, dim=-1)
 
         origin = origin @ ry.T @ rz.T
         origin = origin + self.center
 
         return Ray(origin, dir)
     
-
 class Sphere:
-    def __init__(self, center, radius, ambient, diffuse):
+    def __init__(self, center, radius, ambient, diffuse, specular, specular_n):
         self.center = torch.tensor(center)
         self.radius = torch.tensor(radius)
         self.ambient = torch.tensor(ambient)
         self.diffuse = torch.tensor(diffuse)
+        self.specular = torch.tensor(specular)
+        self.specular_n = torch.tensor(specular_n)
     
     def intersect(self, ray):
         ray_to_center = self.center - ray.origin
@@ -73,8 +74,7 @@ class Sphere:
         return hit_point_dist
 
     def shade(self, ray, mask, z_buffer, scene):
-        color = torch.zeros([*ray.dim, 3])
-        color[mask] = self.ambient * scene.ambient
+        ambient = self.ambient * scene.ambient
 
         light_center = [light.center for light in scene.lights]
         light_center = torch.stack(light_center, dim=0).unsqueeze(0)
@@ -84,13 +84,18 @@ class Sphere:
         hit_point = ray.origin + ray.dir * z_buffer.unsqueeze(-1)
         hit_point = hit_point[mask].unsqueeze(1)
         normal = (hit_point - self.center) / self.radius
-        to_light = light_center - hit_point
-        to_light /= to_light.norm(dim=-1, keepdim=True)
+        to_light = normalize(light_center - hit_point, dim=-1)
         inner_prod = (normal * to_light).sum(-1).unsqueeze(-1)
         inner_prod[inner_prod < 0] = 0
         diffuse = self.diffuse * inner_prod * light_color
-        color[mask] += diffuse.sum(dim=1)
-        
+
+        reflection_light = normalize(2 * normal - to_light, dim=-1)
+        inner_prod = (-ray.dir[mask].unsqueeze(1) * reflection_light).sum(dim=-1, keepdim=True)
+        inner_prod[inner_prod < 0] = 0
+        specular = self.specular * inner_prod**self.specular_n * light_color
+
+        color = torch.zeros([*ray.dim, 3])
+        color[mask] += ambient + diffuse.sum(dim=1) + specular.sum(dim=1)
         return color
 
 
