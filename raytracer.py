@@ -18,41 +18,12 @@ class Scene:
         self.ambient = torch.tensor(ambient)
         self.objects = objects
         self.lights = lights
+        self.total_rays = 0
 
 class Light():
     def __init__(self, center, color):
         self.center = torch.tensor(center)
         self.color = torch.tensor(color)
-
-class Camera:
-    def __init__(self, center, target, focus=300, width=200, height=100, ppi=1):
-        self.center = torch.tensor(center)
-        self.target = torch.tensor(target)
-        self.focus = focus
-        self.width = width
-        self.height = height
-        self.ppi = ppi
-    
-    def gen_ray(self):
-        width = self.width
-        height = self.height
-        ppi = self.ppi
-        image_dim = [height*ppi, width*ppi]
-
-        rotation = rotate(self.target - self.center)
-
-        w = torch.arange(-width/2, width/2, 1/ppi).view([1, -1]).expand(image_dim)
-        h = torch.arange(-height/2, height/2, 1/ppi).view([-1, 1]).expand(image_dim)
-        d = torch.zeros(image_dim)
-        origin = torch.stack([d, -w, -h], dim=-1).view([-1, 3])
-        eye = torch.tensor([-self.focus, 0, 0])
-        dir = origin - eye
-        dir = normalize(dir @ rotation.T, dim=-1)
-
-        origin = origin @ rotation.T
-        origin = origin + self.center
-
-        return Ray(origin, dir), image_dim
 
 class Object:
     def __init__(self, ambient, diffuse, specular, specular_n):
@@ -170,7 +141,46 @@ class Sphere(Object):
         return normal
 
 
+class Camera:
+    def __init__(self, center, target, focus=300):
+        self.center = torch.tensor(center)
+        self.target = torch.tensor(target)
+        self.focus = focus
+    
+    def gen_ray(self, width, height, ppi, super_sample):
+        image_dim = [height * ppi * super_sample, width * ppi * super_sample]
+
+        rotation = rotate(self.target - self.center)
+
+        w = torch.arange(-width/2, width/2, 1/(ppi * super_sample)).view([1, -1]).expand(image_dim)
+        h = torch.arange(-height/2, height/2, 1/(ppi * super_sample)).view([-1, 1]).expand(image_dim)
+        d = torch.zeros(image_dim)
+        origin = torch.stack([d, -w, -h], dim=-1).view([-1, 3])
+        eye = torch.tensor([-self.focus, 0, 0])
+        dir = origin - eye
+        dir = normalize(dir @ rotation.T, dim=-1)
+
+        origin = origin @ rotation.T
+        origin = origin + self.center
+
+        return Ray(origin, dir)
+
+        
+    def render(self, scene, width=200, height=100, ppi=2, super_sample=2):
+        ray = self.gen_ray(width, height, ppi, super_sample)
+        image = trace(scene, ray, level=2)
+        image[(image == 0).all(dim=-1)] = scene.background
+        image[image >= 1] = 1
+        image = image.view([height * ppi * super_sample, width * ppi * super_sample, 3])
+        if(super_sample > 1):
+            image = image.permute([2,0,1])
+            image = torch.nn.functional.conv2d(image, torch.ones([3, 1, super_sample, super_sample]) / super_sample ** 2, stride=super_sample, groups=3)
+            image = image.permute([1,2,0])
+        return image
+
+
 def trace(scene, ray, level):
+    scene.total_rays += ray.len
     image = torch.zeros([ray.len, 3])
     
     z_buffer = [object.intersect(ray) for object in scene.objects]
@@ -185,15 +195,6 @@ def trace(scene, ray, level):
         shade = obj.shade(ray[mask], z_buffer[idx][mask], scene, level)
         image[mask] += shade
     return image
-
-    
-def render(scene, camera):
-    ray, image_dim = camera.gen_ray()
-    image = trace(scene, ray, level=2)
-    image[(image == 0).all(dim=-1)] = scene.background
-    image[image >= 1] = 1
-    return image.view([*image_dim, 3])
-
 
 def rotate(vec):
     x, y, z = vec.split(1, dim=-1)
