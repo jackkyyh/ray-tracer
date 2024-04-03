@@ -27,15 +27,13 @@ class Light():
         self.color = torch.tensor(color)
 
 class Object:
-    def __init__(self, ambient, diffuse, specular, specular_n):
-        self.ambient = torch.tensor(ambient)
+    def __init__(self, intrinsic, diffuse, specular, specular_n):
+        self.intrinsic = torch.tensor(intrinsic)
         self.diffuse = torch.tensor(diffuse)
         self.specular = torch.tensor(specular)
         self.specular_n = torch.tensor(specular_n)
     
     def shade(self, ray, hit_dist, scene, level):
-        ambient = self.ambient * scene.ambient
-
         light_center = [light.center for light in scene.lights]
         light_center = torch.stack(light_center, dim=0).unsqueeze(1)
         light_color = [light.color for light in scene.lights]
@@ -92,12 +90,13 @@ class Object:
 
 
         color = torch.zeros([ray.len, 3])
-        color += ambient
+        color += scene.ambient
         color += diffuse.sum(dim=0)
         color += specular.sum(dim=0)
         if(level > 1):
             color += diffuse_traced
             color += specular_traced
+        color *= self.intrinsic
         return color
 
 class Rect(Object):
