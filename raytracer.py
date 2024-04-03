@@ -93,16 +93,9 @@ class Object:
         if(level == 0):
             return 0
 
-        x_sq = torch.rand([RAYTRACE_BOUNCE,ray.len])
-        y = (1 - x_sq).sqrt()
-        phi = torch.rand_like(x_sq) * 2 * torch.pi
-        wave_packet = torch.stack([x_sq.sqrt(), y * phi.cos(), y * phi.sin()], dim=-1)
-        inner_prod = wave_packet[...,0].unsqueeze(-1)
-        rotation = rotate(normal)
-        wave_packet = (rotation @ wave_packet.unsqueeze(-1)).squeeze(-1)
-        bounce_ray = Ray(hit_point.repeat([RAYTRACE_BOUNCE, 1]), wave_packet.view([RAYTRACE_BOUNCE * ray.len, 3]))
-        traced = trace(scene, bounce_ray, level=level-1)
-        traced = traced.view([RAYTRACE_BOUNCE, ray.len, 3])
+        x = torch.rand([RAYTRACE_BOUNCE,ray.len]).sqrt()
+        inner_prod = x.unsqueeze(-1)
+        traced = gen_and_trace_ray(x, normal, hit_point, scene, level)
         diffuse_traced = self.diffuse_factor * (inner_prod * traced).mean(dim=0)
         return diffuse_traced
 
@@ -113,17 +106,9 @@ class Object:
             return 0
 
         x = torch.rand([RAYTRACE_BOUNCE,ray.len]) ** (1/(self.specular_n+1))
-        x_sq = x ** 2
-        y = (1 - x_sq).sqrt()
-        phi = torch.rand_like(x_sq) * 2 * torch.pi
-        wave_packet = torch.stack([x_sq.sqrt(), y * phi.cos(), y * phi.sin()], dim=-1)
-        inner_prod = wave_packet[...,0].unsqueeze(-1)
+        inner_prod = x.unsqueeze(-1)
         eye_reflection = ray.dir - 2 * normal * (ray.dir * normal).sum(-1, keepdim=True)
-        rotation = rotate(eye_reflection)
-        wave_packet = (rotation @ wave_packet.unsqueeze(-1)).squeeze(-1)
-        bounce_ray = Ray(hit_point.repeat([RAYTRACE_BOUNCE, 1]), wave_packet.view([RAYTRACE_BOUNCE * ray.len, 3]))
-        traced = trace(scene, bounce_ray, level=level-1)
-        traced = traced.view([RAYTRACE_BOUNCE, ray.len, 3])
+        traced = gen_and_trace_ray(x, eye_reflection, hit_point, scene, level)
         specular_traced = self.specular_factor * (inner_prod**self.specular_n * traced).mean(dim=0)
         return specular_traced
 
@@ -214,6 +199,18 @@ class Camera:
             image = image.permute([1,2,0])
         return image
 
+
+def gen_and_trace_ray(x, ray_center, hit_point, scene, level):
+    y = (1 - x**2).sqrt()
+    phi = torch.rand_like(x) * 2 * torch.pi
+    wave_packet = torch.stack([x, y * phi.cos(), y * phi.sin()], dim=-1)
+
+    rotation = rotate(ray_center)
+    wave_packet = (rotation @ wave_packet.unsqueeze(-1)).squeeze(-1)
+    bounce_ray = Ray(hit_point.repeat([RAYTRACE_BOUNCE, 1]), wave_packet.view([RAYTRACE_BOUNCE * len(hit_point), 3]))
+    traced = trace(scene, bounce_ray, level=level-1)
+    traced = traced.view([RAYTRACE_BOUNCE, len(hit_point), 3])
+    return traced
 
 def trace(scene, ray, level):
     scene.total_rays += ray.len
