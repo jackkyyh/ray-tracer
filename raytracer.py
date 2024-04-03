@@ -1,7 +1,7 @@
 import torch
 from torch.nn.functional import normalize
 
-RAYTRACE_BOUNCE = 20
+RAYTRACE_BOUNCE = 10
 HIT_TOO_CLOSE = 0.1
 
 
@@ -27,11 +27,11 @@ class Light():
         self.color = torch.tensor(color)
 
 class Object:
-    def __init__(self, intrinsic, diffuse, specular, specular_n):
+    def __init__(self, intrinsic, diffuse=0.3, specular=0.1, specular_n=3):
         self.intrinsic = torch.tensor(intrinsic)
-        self.diffuse = torch.tensor(diffuse)
-        self.specular = torch.tensor(specular)
-        self.specular_n = torch.tensor(specular_n)
+        self.diffuse_factor = diffuse
+        self.specular_factor = specular
+        self.specular_n = specular_n
     
     def shade(self, ray, hit_dist, scene, level):
         light_center = [light.center for light in scene.lights]
@@ -50,54 +50,82 @@ class Object:
         z_buffer = [object.intersect(to_light_ray) for object in scene.objects]
         z_buffer = torch.stack(z_buffer, dim=0)
         occluded = z_buffer.isinf().all(dim=0).logical_not().view(to_light.shape[:2])
+        to_light[occluded] = 0
+
+
+        diffuse = self.diffuse(ray, to_light, normal, light_color)
+        specular = self.specular(ray, to_light, normal, light_color)
+
+        diffuse_traced = self.diffuse_traced(ray, hit_point, normal, scene, level)
+        specular_traced = self.specular_traced(ray, hit_point, normal, scene, level)
+
+        color = torch.zeros_like(ray.dir)
+        color += scene.ambient
+        color += diffuse
+        color += specular
+        color += diffuse_traced
+        color += specular_traced
+        color *= self.intrinsic
+        return color
+
+    def diffuse(self, ray, to_light, normal, light_color):
+        if (self.diffuse_factor == 0):
+            return 0
 
         inner_prod = (normal * to_light).sum(-1, keepdim=True)
         inner_prod[inner_prod < 0] = 0
-        inner_prod[occluded] = 0
-        diffuse = self.diffuse * inner_prod * light_color
+        diffuse = self.diffuse_factor * (inner_prod * light_color).sum(dim=0)
+        return diffuse
+
+    def specular(self, ray, to_light, normal, light_color):
+        if (self.specular_factor == 0):
+            return 0
 
         reflection_light = 2 * normal * (to_light * normal).sum(-1, keepdim=True) - to_light
         inner_prod = (-ray.dir * reflection_light).sum(dim=-1, keepdim=True)
         inner_prod[inner_prod < 0] = 0
-        inner_prod[occluded] = 0
-        specular = self.specular * inner_prod**self.specular_n * light_color
+        specular = self.specular_factor * (inner_prod**self.specular_n * light_color).sum(dim=0)
+        return specular
 
-        if(level > 1):
-            x_sq = torch.rand([RAYTRACE_BOUNCE,ray.len])
-            y = (1 - x_sq).sqrt()
-            phi = torch.rand_like(x_sq) * 2 * torch.pi
-            wave_packet = torch.stack([x_sq.sqrt(), y * phi.cos(), y * phi.sin()], dim=-1)
-            inner_prod = wave_packet[...,0].unsqueeze(-1)
-            rotation = rotate(normal)
-            wave_packet = (rotation @ wave_packet.unsqueeze(-1)).squeeze(-1)
-            bounce_ray = Ray(hit_point.repeat([RAYTRACE_BOUNCE, 1]), wave_packet.view([RAYTRACE_BOUNCE * ray.len, 3]))
-            traced = trace(scene, bounce_ray, level=level-1)
-            traced = traced.view([RAYTRACE_BOUNCE, ray.len, 3])
-            diffuse_traced = self.diffuse * (inner_prod * traced).mean(dim=0)
+    def diffuse_traced(self, ray, hit_point, normal, scene, level):
+        if (self.diffuse_factor == 0):
+            return 0
+        if(level == 0):
+            return 0
 
-            x = torch.rand([RAYTRACE_BOUNCE,ray.len]) ** (1/(self.specular_n+1))
-            x_sq = x ** 2
-            y = (1 - x_sq).sqrt()
-            wave_packet = torch.stack([x_sq.sqrt(), y * phi.cos(), y * phi.sin()], dim=-1)
-            inner_prod = wave_packet[...,0].unsqueeze(-1)
-            eye_reflection = ray.dir - 2 * normal * (ray.dir * normal).sum(-1, keepdim=True)
-            rotation = rotate(eye_reflection)
-            wave_packet = (rotation @ wave_packet.unsqueeze(-1)).squeeze(-1)
-            bounce_ray = Ray(hit_point.repeat([RAYTRACE_BOUNCE, 1]), wave_packet.view([RAYTRACE_BOUNCE * ray.len, 3]))
-            traced = trace(scene, bounce_ray, level=level-1)
-            traced = traced.view([RAYTRACE_BOUNCE, ray.len, 3])
-            specular_traced = self.specular * (inner_prod**self.specular_n * traced).mean(dim=0)
+        x_sq = torch.rand([RAYTRACE_BOUNCE,ray.len])
+        y = (1 - x_sq).sqrt()
+        phi = torch.rand_like(x_sq) * 2 * torch.pi
+        wave_packet = torch.stack([x_sq.sqrt(), y * phi.cos(), y * phi.sin()], dim=-1)
+        inner_prod = wave_packet[...,0].unsqueeze(-1)
+        rotation = rotate(normal)
+        wave_packet = (rotation @ wave_packet.unsqueeze(-1)).squeeze(-1)
+        bounce_ray = Ray(hit_point.repeat([RAYTRACE_BOUNCE, 1]), wave_packet.view([RAYTRACE_BOUNCE * ray.len, 3]))
+        traced = trace(scene, bounce_ray, level=level-1)
+        traced = traced.view([RAYTRACE_BOUNCE, ray.len, 3])
+        diffuse_traced = self.diffuse_factor * (inner_prod * traced).mean(dim=0)
+        return diffuse_traced
 
+    def specular_traced(self, ray, hit_point, normal, scene, level):
+        if (self.specular_factor == 0):
+            return 0
+        if(level == 0):
+            return 0
 
-        color = torch.zeros([ray.len, 3])
-        color += scene.ambient
-        color += diffuse.sum(dim=0)
-        color += specular.sum(dim=0)
-        if(level > 1):
-            color += diffuse_traced
-            color += specular_traced
-        color *= self.intrinsic
-        return color
+        x = torch.rand([RAYTRACE_BOUNCE,ray.len]) ** (1/(self.specular_n+1))
+        x_sq = x ** 2
+        y = (1 - x_sq).sqrt()
+        phi = torch.rand_like(x_sq) * 2 * torch.pi
+        wave_packet = torch.stack([x_sq.sqrt(), y * phi.cos(), y * phi.sin()], dim=-1)
+        inner_prod = wave_packet[...,0].unsqueeze(-1)
+        eye_reflection = ray.dir - 2 * normal * (ray.dir * normal).sum(-1, keepdim=True)
+        rotation = rotate(eye_reflection)
+        wave_packet = (rotation @ wave_packet.unsqueeze(-1)).squeeze(-1)
+        bounce_ray = Ray(hit_point.repeat([RAYTRACE_BOUNCE, 1]), wave_packet.view([RAYTRACE_BOUNCE * ray.len, 3]))
+        traced = trace(scene, bounce_ray, level=level-1)
+        traced = traced.view([RAYTRACE_BOUNCE, ray.len, 3])
+        specular_traced = self.specular_factor * (inner_prod**self.specular_n * traced).mean(dim=0)
+        return specular_traced
 
 class Rect(Object):
     def __init__(self, center, width, height, width_dir, normal, **kwargs):
@@ -131,7 +159,7 @@ class Sphere(Object):
     def __init__(self, center, radius, **kwargs):
         super().__init__(**kwargs)
         self.center = torch.tensor(center)
-        self.radius = torch.tensor(radius)
+        self.radius = radius
 
     def intersect(self, ray):
         ray_to_center = self.center - ray.origin
@@ -176,7 +204,7 @@ class Camera:
         
     def render(self, scene, width=200, height=100, ppi=2, super_sample=2):
         ray = self.gen_ray(width, height, ppi, super_sample)
-        image = trace(scene, ray, level=2)
+        image = trace(scene, ray, level=1)
         image[(image == 0).all(dim=-1)] = scene.background
         image[image >= 1] = 1
         image = image.view([height * ppi * super_sample, width * ppi * super_sample, 3])
