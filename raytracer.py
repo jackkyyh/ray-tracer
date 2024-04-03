@@ -2,6 +2,7 @@ import torch
 from torch.nn.functional import normalize
 
 RAYTRACE_BOUNCE = 20
+HIT_TOO_CLOSE = 0.1
 
 
 class Ray:
@@ -45,15 +46,22 @@ class Object:
         #[hit, 3]
         normal = self.normal(ray, hit_point)
 
-         #[l, hit, 3]
+        #[l, hit, 3]
         to_light = normalize(light_center - hit_point, dim=-1)
+        to_light_ray = Ray(hit_point.repeat([len(to_light), 1]), to_light.view([-1, 3]))
+        z_buffer = [object.intersect(to_light_ray) for object in scene.objects]
+        z_buffer = torch.stack(z_buffer, dim=0)
+        occluded = z_buffer.isinf().all(dim=0).logical_not().view(to_light.shape[:2])
+
         inner_prod = (normal * to_light).sum(-1, keepdim=True)
         inner_prod[inner_prod < 0] = 0
+        inner_prod[occluded] = 0
         diffuse = self.diffuse * inner_prod * light_color
 
         reflection_light = 2 * normal * (to_light * normal).sum(-1, keepdim=True) - to_light
         inner_prod = (-ray.dir * reflection_light).sum(dim=-1, keepdim=True)
         inner_prod[inner_prod < 0] = 0
+        inner_prod[occluded] = 0
         specular = self.specular * inner_prod**self.specular_n * light_color
 
         if(level > 1):
@@ -113,7 +121,7 @@ class Rect(Object):
         h_sq = (center_to_hit**2).sum(dim=-1) - w_sq
 
         hit_dist[torch.logical_or(w_sq > self.width**2/4, h_sq > self.height**2/4)] = torch.inf
-        hit_dist[hit_dist < 0.1] = torch.inf
+        hit_dist[hit_dist < HIT_TOO_CLOSE] = torch.inf
         return hit_dist
 
     def normal(self, ray, *args):
@@ -134,6 +142,7 @@ class Sphere(Object):
 
         hit_dist = c - torch.sqrt(self.radius**2 - s)
         hit_dist[hit_dist.isnan()] = torch.inf
+        hit_dist[hit_dist < HIT_TOO_CLOSE] = torch.inf
         return hit_dist
 
     def normal(self, ray, hit_point):
