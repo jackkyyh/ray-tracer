@@ -3,6 +3,7 @@ from torch.nn.functional import normalize
 
 RAYTRACE_BOUNCE = 10
 HIT_TOO_CLOSE = 0.1
+EPSILON = 1e-3
 
 
 class Ray:
@@ -124,9 +125,9 @@ class Rect(Object):
 
     def intersect(self, ray):
         origin_to_center = self.center - ray.origin
-        origin_to_center_dist = (origin_to_center * self.normal_vec).sum(dim=-1,)
+        origin_to_plane_dist = (origin_to_center * self.normal_vec).sum(dim=-1,)
         ray_normal_angle = (ray.dir * self.normal_vec).sum(dim=-1)
-        hit_dist = origin_to_center_dist / ray_normal_angle
+        hit_dist = origin_to_plane_dist / ray_normal_angle
         hit_point = ray.origin + ray.dir * hit_dist.unsqueeze(dim=-1)
         center_to_hit = hit_point - self.center
         w_sq = (center_to_hit * self.width_dir).sum(dim=-1)**2
@@ -148,13 +149,19 @@ class Sphere(Object):
 
     def intersect(self, ray):
         ray_to_center = self.center - ray.origin
-        dist = ray_to_center.norm(dim=-1)
+        dist_sq = (ray_to_center * ray_to_center).sum(dim=-1)
         c = (ray.dir * ray_to_center).sum(dim=-1)
-        s = dist**2 - c**2
+        s = dist_sq - c**2
+        
+        to_center = c > 0
+        outside = dist_sq > (self.radius**2 + HIT_TOO_CLOSE * (to_center * 2 - 1))
+        
+        proj_to_hit = torch.sqrt(self.radius**2 - s)
+        proj_to_hit *= torch.logical_and(outside, to_center) * -2 + 1
 
-        hit_dist = c - torch.sqrt(self.radius**2 - s)
+        hit_dist = c + proj_to_hit
         hit_dist[hit_dist.isnan()] = torch.inf
-        hit_dist[hit_dist < HIT_TOO_CLOSE] = torch.inf
+        hit_dist[hit_dist <= EPSILON] = torch.inf
         return hit_dist
 
     def normal(self, ray, hit_point):
