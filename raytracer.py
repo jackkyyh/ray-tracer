@@ -1,7 +1,7 @@
+from math import ceil
 import torch
 from torch.nn.functional import normalize
 
-RAYTRACE_BOUNCE = 5
 HIT_TOO_CLOSE = 0.1
 EPSILON = 1e-3
 
@@ -114,11 +114,8 @@ class Object:
         if(level == 0):
             return 0
 
-        x = torch.rand([RAYTRACE_BOUNCE,ray.len]).sqrt()
-        inner_prod = x.unsqueeze(-1)
-        traced = gen_and_trace_ray(x, normal, hit_point, scene, level)
-        diffuse_traced = self.diffuse_factor * (inner_prod * traced).mean(dim=0)
-        return diffuse_traced
+        traced = gen_and_trace_ray(normal, 1, self.diffuse_factor, hit_point, scene, level)
+        return traced
 
     def specular_traced(self, ray, hit_point, normal, scene, level):
         if (self.specular_factor == 0):
@@ -126,29 +123,22 @@ class Object:
         if(level == 0):
             return 0
 
-        x = torch.rand([RAYTRACE_BOUNCE,ray.len]) ** (1/(self.specular_n+1))
-        inner_prod = x.unsqueeze(-1)
         eye_reflection = ray.dir - 2 * normal * (ray.dir * normal).sum(-1, keepdim=True)
-        traced = gen_and_trace_ray(x, eye_reflection, hit_point, scene, level)
-        specular_traced = self.specular_factor * (inner_prod**self.specular_n * traced).mean(dim=0)
-        return specular_traced
+        traced = gen_and_trace_ray(eye_reflection, self.specular_n, self.specular_factor, hit_point, scene, level)
+        return traced
 
     def refraction_traced(self, ray, hit_point, normal, scene, level):
         if (self.refraction_factor == 0):
             return 0
         if(level == 0):
             return 0
-        
-        x = torch.ones([RAYTRACE_BOUNCE, ray.len]) ** (1/(self.specular_n*6))
-        inner_prod = x.unsqueeze(-1)
 
         c = (-ray.dir * normal).sum(-1, keepdim=True)
         idx = self.refraction_index ** -c.sgn()
         factor = idx * c.abs() - (1 + idx**2 * (c**2 - 1)).abs().sqrt()
         eye_refraction = idx * ray.dir + factor * normal
-        traced = gen_and_trace_ray(x, eye_refraction, hit_point, scene, level)
-        refraction_traced = self.refraction_factor * (inner_prod**self.specular_n * traced).mean(dim=0)
-        return refraction_traced
+        traced = gen_and_trace_ray(eye_refraction, self.specular_n, self.refraction_factor, hit_point, scene, level)
+        return traced
     
 class Rect(Object):
     def __init__(self, center, width, height, width_dir, normal, **kwargs):
@@ -244,16 +234,33 @@ class Camera:
         return image
 
 
-def gen_and_trace_ray(x, ray_center, hit_point, scene, level):
+def gen_and_trace_ray(center, concentration, intensity, hit_point, scene, level):
+    if(concentration == 1):
+        num_bounce = 30
+    elif(concentration <= 50):
+        num_bounce = 15
+    elif(concentration <= 1e2):
+        num_bounce = 5
+    else:
+        num_bounce = 1
+
+    num_bounce = num_bounce ** (level/2)
+    num_bounce = ceil(num_bounce * intensity)
+    
+    if num_bounce == 1:
+        x = torch.ones([num_bounce, len(hit_point)])
+    else:
+        x = torch.rand([num_bounce, len(hit_point)]) ** (1/(2*concentration))
+    
     y = (1 - x**2).sqrt()
     phi = torch.rand_like(x) * 2 * torch.pi
     wave_packet = torch.stack([x, y * phi.cos(), y * phi.sin()], dim=-1)
 
-    rotation = rotate(ray_center)
-    wave_packet = (rotation @ wave_packet.unsqueeze(-1)).squeeze(-1)
-    bounce_ray = Ray(hit_point.repeat([RAYTRACE_BOUNCE, 1]), wave_packet.view([RAYTRACE_BOUNCE * len(hit_point), 3]))
+    wave_packet = (rotate(center) @ wave_packet.unsqueeze(-1)).squeeze(-1)
+    bounce_ray = Ray(hit_point.repeat([num_bounce, 1]), wave_packet.view([num_bounce * len(hit_point), 3]))
     traced = trace(scene, bounce_ray, level=level-1)
-    traced = traced.view([RAYTRACE_BOUNCE, len(hit_point), 3])
+    traced = traced.view([num_bounce, len(hit_point), 3])
+    traced = intensity * (x.unsqueeze(-1) ** concentration * traced).mean(0)
     return traced
 
 def trace(scene, ray, level):
