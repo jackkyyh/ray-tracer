@@ -1,7 +1,7 @@
 import torch
 from torch.nn.functional import normalize
 
-RAYTRACE_BOUNCE = 10
+RAYTRACE_BOUNCE = 5
 HIT_TOO_CLOSE = 0.1
 EPSILON = 1e-3
 
@@ -28,11 +28,14 @@ class Light():
         self.color = torch.tensor(color)
 
 class Object:
-    def __init__(self, intrinsic, diffuse=0.3, specular=0.1, specular_n=3):
+    def __init__(self, intrinsic, diffuse=0.3, specular=0.1, specular_n=3,
+                 refraction=0, refraction_index=1):
         self.intrinsic = torch.tensor(intrinsic)
         self.diffuse_factor = diffuse
         self.specular_factor = specular
         self.specular_n = specular_n
+        self.refraction_factor = refraction
+        self.refraction_index = refraction_index
     
     def shade(self, ray, hit_dist, scene, level):
         light_center = [light.center for light in scene.lights]
@@ -56,16 +59,20 @@ class Object:
 
         diffuse = self.diffuse(ray, to_light, normal, light_color)
         specular = self.specular(ray, to_light, normal, light_color)
+        refraction = self.refraction(ray, to_light, normal, light_color)
 
         diffuse_traced = self.diffuse_traced(ray, hit_point, normal, scene, level)
         specular_traced = self.specular_traced(ray, hit_point, normal, scene, level)
+        refraction_traced = self.refraction_traced(ray, hit_point, normal, scene, level)
 
         color = torch.zeros_like(ray.dir)
         color += scene.ambient
         color += diffuse
         color += specular
+        color += refraction
         color += diffuse_traced
         color += specular_traced
+        color += refraction_traced
         color *= self.intrinsic
         return color
 
@@ -88,6 +95,19 @@ class Object:
         specular = self.specular_factor * (inner_prod**self.specular_n * light_color).sum(dim=0)
         return specular
 
+    def refraction(self, ray, to_light, normal, light_color):
+        if (self.refraction_factor == 0):
+            return 0
+        
+        c = (to_light * normal).sum(-1, keepdim=True).abs()
+        idx = self.refraction_index ** -c.sgn()
+        factor = idx * c.abs() - (1 + idx**2 * (c**2 - 1)).sqrt()
+        refraction_light = idx * -to_light + factor * normal
+        inner_prod = (-ray.dir * refraction_light).sum(dim=-1, keepdim=True)
+        inner_prod[inner_prod < 0] = 0
+        refraction = self.refraction_factor * (inner_prod**self.specular_n * light_color).sum(dim=0)
+        return refraction
+    
     def diffuse_traced(self, ray, hit_point, normal, scene, level):
         if (self.diffuse_factor == 0):
             return 0
@@ -113,6 +133,23 @@ class Object:
         specular_traced = self.specular_factor * (inner_prod**self.specular_n * traced).mean(dim=0)
         return specular_traced
 
+    def refraction_traced(self, ray, hit_point, normal, scene, level):
+        if (self.refraction_factor == 0):
+            return 0
+        if(level == 0):
+            return 0
+        
+        x = torch.ones([RAYTRACE_BOUNCE, ray.len]) ** (1/(self.specular_n*6))
+        inner_prod = x.unsqueeze(-1)
+
+        c = (-ray.dir * normal).sum(-1, keepdim=True)
+        idx = self.refraction_index ** -c.sgn()
+        factor = idx * c.abs() - (1 + idx**2 * (c**2 - 1)).abs().sqrt()
+        eye_refraction = idx * ray.dir + factor * normal
+        traced = gen_and_trace_ray(x, eye_refraction, hit_point, scene, level)
+        refraction_traced = self.refraction_factor * (inner_prod**self.specular_n * traced).mean(dim=0)
+        return refraction_traced
+    
 class Rect(Object):
     def __init__(self, center, width, height, width_dir, normal, **kwargs):
         super().__init__(**kwargs)
@@ -196,7 +233,7 @@ class Camera:
         
     def render(self, scene, width=200, height=100, ppi=2, super_sample=2):
         ray = self.gen_ray(width, height, ppi, super_sample)
-        image = trace(scene, ray, level=1)
+        image = trace(scene, ray, level=2)
         image[(image == 0).all(dim=-1)] = scene.background
         image[image >= 1] = 1
         image = image.view([height * ppi * super_sample, width * ppi * super_sample, 3])
