@@ -5,6 +5,7 @@ from torch.nn.functional import normalize
 HIT_TOO_CLOSE = 0.1
 EPSILON = 1e-3
 
+inner = lambda a, b: (a * b).sum(-1, keepdim=True)
 
 class Ray:
     def __init__(self, origin, dir):
@@ -80,7 +81,7 @@ class Object:
         if (self.diffuse_factor == 0):
             return 0
 
-        inner_prod = (normal * to_light).sum(-1, keepdim=True)
+        inner_prod = inner(normal, to_light)
         inner_prod[inner_prod < 0] = 0
         diffuse = self.diffuse_factor * (inner_prod * light_color).sum(dim=0)
         return diffuse
@@ -89,8 +90,8 @@ class Object:
         if (self.specular_factor == 0):
             return 0
 
-        reflection_light = 2 * normal * (to_light * normal).sum(-1, keepdim=True) - to_light
-        inner_prod = (-ray.dir * reflection_light).sum(dim=-1, keepdim=True)
+        reflection_light = 2 * normal * inner(to_light, normal) - to_light
+        inner_prod = inner(-ray.dir, reflection_light)
         inner_prod[inner_prod < 0] = 0
         specular = self.specular_factor * (inner_prod**self.specular_n * light_color).sum(dim=0)
         return specular
@@ -99,11 +100,11 @@ class Object:
         if (self.refraction_factor == 0):
             return 0
         
-        c = (to_light * normal).sum(-1, keepdim=True).abs()
+        c = inner(to_light, normal).abs()
         idx = self.refraction_index ** -c.sgn()
         factor = idx * c.abs() - (1 + idx**2 * (c**2 - 1)).sqrt()
         refraction_light = idx * -to_light + factor * normal
-        inner_prod = (-ray.dir * refraction_light).sum(dim=-1, keepdim=True)
+        inner_prod = inner(-ray.dir, refraction_light)
         inner_prod[inner_prod < 0] = 0
         refraction = self.refraction_factor * (inner_prod**self.specular_n * light_color).sum(dim=0)
         return refraction
@@ -123,7 +124,7 @@ class Object:
         if(level == 0):
             return 0
 
-        eye_reflection = ray.dir - 2 * normal * (ray.dir * normal).sum(-1, keepdim=True)
+        eye_reflection = ray.dir - 2 * normal * inner(ray.dir, normal)
         traced = gen_and_trace_ray(eye_reflection, self.specular_n, self.specular_factor, hit_point, scene, level)
         return traced
 
@@ -133,7 +134,7 @@ class Object:
         if(level == 0):
             return 0
 
-        c = (-ray.dir * normal).sum(-1, keepdim=True)
+        c = inner(-ray.dir, normal)
         idx = self.refraction_index ** -c.sgn()
         factor = idx * c.abs() - (1 + idx**2 * (c**2 - 1)).abs().sqrt()
         eye_refraction = idx * ray.dir + factor * normal
@@ -148,24 +149,24 @@ class Rect(Object):
         self.height = height
         self.width_dir = torch.tensor(width_dir)
         self.normal_vec = torch.tensor(normal)
-        assert self.width_dir @ self.normal_vec == 0, "normal vector and width direction not perpendicular"
+        assert inner(self.width_dir, self.normal_vec) == 0, "normal vector and width direction not perpendicular"
 
     def intersect(self, ray):
         origin_to_center = self.center - ray.origin
-        origin_to_plane_dist = (origin_to_center * self.normal_vec).sum(dim=-1,)
-        ray_normal_angle = (ray.dir * self.normal_vec).sum(dim=-1)
+        origin_to_plane_dist = inner(origin_to_center, self.normal_vec)
+        ray_normal_angle = inner(ray.dir, self.normal_vec)
         hit_dist = origin_to_plane_dist / ray_normal_angle
-        hit_point = ray.origin + ray.dir * hit_dist.unsqueeze(dim=-1)
+        hit_point = ray.origin + ray.dir * hit_dist
         center_to_hit = hit_point - self.center
-        w_sq = (center_to_hit * self.width_dir).sum(dim=-1)**2
-        h_sq = (center_to_hit**2).sum(dim=-1) - w_sq
+        w_sq = inner(center_to_hit, self.width_dir) ** 2
+        h_sq = inner(center_to_hit, center_to_hit) - w_sq
 
         hit_dist[torch.logical_or(w_sq > self.width**2/4, h_sq > self.height**2/4)] = torch.inf
         hit_dist[hit_dist < HIT_TOO_CLOSE] = torch.inf
-        return hit_dist
+        return hit_dist.squeeze(-1)
 
     def normal(self, ray, *args):
-        sign = -(self.normal_vec * ray.dir).sum(dim=-1, keepdim=True).sgn()
+        sign = -inner(self.normal_vec, ray.dir).sgn()
         return self.normal_vec * sign
 
 class Sphere(Object):
@@ -176,8 +177,8 @@ class Sphere(Object):
 
     def intersect(self, ray):
         ray_to_center = self.center - ray.origin
-        dist_sq = (ray_to_center * ray_to_center).sum(dim=-1)
-        c = (ray.dir * ray_to_center).sum(dim=-1)
+        dist_sq = inner(ray_to_center, ray_to_center)
+        c = inner(ray.dir, ray_to_center)
         s = dist_sq - c**2
         
         to_center = c > 0
@@ -189,7 +190,7 @@ class Sphere(Object):
         hit_dist = c + proj_to_hit
         hit_dist[hit_dist.isnan()] = torch.inf
         hit_dist[hit_dist <= EPSILON] = torch.inf
-        return hit_dist
+        return hit_dist.squeeze(-1)
 
     def normal(self, ray, hit_point):
         normal = (hit_point - self.center) / self.radius
