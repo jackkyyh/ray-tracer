@@ -2,6 +2,9 @@ from math import ceil
 import torch
 from torch.nn.functional import normalize
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+torch.set_default_device(device)
+
 HIT_TOO_CLOSE = 0.1
 EPSILON = 1e-3
 
@@ -232,7 +235,7 @@ class Camera:
             image = image.permute([2,0,1])
             image = torch.nn.functional.conv2d(image, torch.ones([3, 1, super_sample, super_sample]) / super_sample ** 2, stride=super_sample, groups=3)
             image = image.permute([1,2,0])
-        return image
+        return image.cpu()
 
 
 def gen_and_trace_ray(center, concentration, intensity, hit_point, scene, level):
