@@ -26,7 +26,7 @@ scene = Scene(
 
 camera = Camera([0,0,50], [100,0,10])
 start_time = time.time()
-image = camera.render(scene, width=200, height=100, ppi=2, super_sample=2)
+image = camera.render(scene, width=180, height=100, ppi=5, super_sample=3, recursive=2)
 end_time = time.time()
 print(f"Traced {scene.total_rays} rays. Took {end_time - start_time:.2f} seconds.")
 plt.imsave("demo.png", image.numpy())

@@ -225,9 +225,9 @@ class Camera:
         return Ray(origin, dir)
 
         
-    def render(self, scene, width=200, height=100, ppi=2, super_sample=2):
+    def render(self, scene, width=200, height=100, ppi=2, super_sample=2, recursive=2):
         ray = self.gen_ray(width, height, ppi, super_sample)
-        image = trace(scene, ray, level=2)
+        image = trace(scene, ray, level=recursive)
         image[(image == 0).all(dim=-1)] = scene.background
         image[image >= 1] = 1
         image = image.view([height * ppi * super_sample, width * ppi * super_sample, 3])
